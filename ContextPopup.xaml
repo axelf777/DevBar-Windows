@@ -1,0 +1,16 @@
+<Window x:Class="DevBar.ContextPopup"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ShowInTaskbar="False"
+        ShowActivated="True"
+        SizeToContent="WidthAndHeight">
+    <Border Background="#FF2D2D30" CornerRadius="8" Padding="4" BorderBrush="#FF3F3F46" BorderThickness="1">
+        <Border.Effect>
+            <DropShadowEffect BlurRadius="12" Opacity="0.4" ShadowDepth="2" />
+        </Border.Effect>
+        <StackPanel x:Name="MenuPanel" MinWidth="160" />
+    </Border>
+</Window>
