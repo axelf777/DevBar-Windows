@@ -101,4 +101,69 @@ public static partial class IconRenderer
         bmp.Save(path, ImageFormat.Png);
         return path;
     }
+
+    /// <summary>
+    /// Generates the app .ico file (multiple sizes) for embedding in the exe.
+    /// Call once during development, not at runtime.
+    /// </summary>
+    public static void GenerateAppIco(string outputPath)
+    {
+        var sizes = new[] { 16, 32, 48, 256 };
+        using var ms = new MemoryStream();
+        using var writer = new BinaryWriter(ms);
+
+        // ICO header
+        writer.Write((short)0);      // reserved
+        writer.Write((short)1);      // type: icon
+        writer.Write((short)sizes.Length);
+
+        // We'll write directory entries first, then image data
+        var imageDataList = new List<byte[]>();
+        foreach (var s in sizes)
+        {
+            using var bmp = new Bitmap(s, s, PixelFormat.Format32bppArgb);
+            using var g = Graphics.FromImage(bmp);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+
+            using var bgBrush = new SolidBrush(ColorTranslator.FromHtml("#2D2D30"));
+            g.FillEllipse(bgBrush, 0, 0, s, s);
+
+            var borderWidth = Math.Max(1f, s / 32f);
+            using var border = new Pen(Green, borderWidth);
+            g.DrawEllipse(border, borderWidth, borderWidth, s - borderWidth * 2, s - borderWidth * 2);
+
+            var fontSize = s * 0.45f;
+            using var font = new Font("Segoe UI", fontSize, FontStyle.Bold, GraphicsUnit.Pixel);
+            using var textBrush = new SolidBrush(Green);
+            var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            g.DrawString("D", font, textBrush, new RectangleF(0, 0, s, s), sf);
+
+            using var pngStream = new MemoryStream();
+            bmp.Save(pngStream, ImageFormat.Png);
+            imageDataList.Add(pngStream.ToArray());
+        }
+
+        // Write directory entries
+        int offset = 6 + sizes.Length * 16; // header + entries
+        for (int i = 0; i < sizes.Length; i++)
+        {
+            var s = sizes[i];
+            writer.Write((byte)(s < 256 ? s : 0)); // width
+            writer.Write((byte)(s < 256 ? s : 0)); // height
+            writer.Write((byte)0);   // color palette
+            writer.Write((byte)0);   // reserved
+            writer.Write((short)1);  // color planes
+            writer.Write((short)32); // bits per pixel
+            writer.Write(imageDataList[i].Length);
+            writer.Write(offset);
+            offset += imageDataList[i].Length;
+        }
+
+        // Write image data
+        foreach (var data in imageDataList)
+            writer.Write(data);
+
+        File.WriteAllBytes(outputPath, ms.ToArray());
+    }
 }

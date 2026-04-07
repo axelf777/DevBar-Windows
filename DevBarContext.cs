@@ -1,9 +1,11 @@
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows.Forms;
 using Microsoft.Toolkit.Uwp.Notifications;
+using Windows.UI.Notifications;
 
 namespace DevBar;
 
@@ -13,6 +15,7 @@ public class DevBarContext : ApplicationContext
     private readonly System.Windows.Forms.Timer _timer;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
     private readonly string _appLogoPath;
+    private readonly string _appIcoPath;
     private static readonly string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DevBar", "devbar.log");
 
@@ -22,6 +25,7 @@ public class DevBarContext : ApplicationContext
     private bool _requestInFlight;
     private DateTime _lastFetchTime = DateTime.MinValue;
     private bool _hasShownPreferences;
+    private int _successfulFetches;
     private PopupWindow? _popupWindow;
     private ContextPopup? _contextPopup;
     private Icon _currentIcon;
@@ -33,6 +37,11 @@ public class DevBarContext : ApplicationContext
         _settings = AppSettings.Load();
         _currentIcon = IconRenderer.Create(IconState.ServerDown);
         _appLogoPath = IconRenderer.SaveAppLogoPng();
+        _appIcoPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DevBar", "devbar.ico");
+
+        // Register custom Start Menu shortcut with our icon for toast branding
+        RegisterToastShortcut();
 
         _trayIcon = new NotifyIcon
         {
@@ -187,7 +196,10 @@ public class DevBarContext : ApplicationContext
 
             if (result is not null)
             {
-                NotifyNewItems(_lastResult, result);
+                _successfulFetches++;
+                // Only notify after 2+ successful fetches so we have a stable baseline
+                if (_successfulFetches > 2)
+                    NotifyNewItems(_lastResult, result);
                 _lastResult = result;
                 UpdateIcon(result);
             }
@@ -313,6 +325,38 @@ public class DevBarContext : ApplicationContext
         };
         window.Show();
         window.Activate();
+    }
+
+    private void RegisterToastShortcut()
+    {
+        try
+        {
+            // Create a Start Menu shortcut with our custom icon so toasts show it in the header
+            var startMenu = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                @"Microsoft\Windows\Start Menu\Programs\DevBar.lnk");
+
+            if (File.Exists(startMenu)) return;
+
+            var exePath = Environment.ProcessPath;
+            if (exePath is null) return;
+
+            // Use WScript.Shell COM to create the shortcut
+            dynamic shell = Activator.CreateInstance(
+                Type.GetTypeFromProgID("WScript.Shell")!)!;
+            var shortcut = shell.CreateShortcut(startMenu);
+            shortcut.TargetPath = exePath;
+            shortcut.IconLocation = _appIcoPath;
+            shortcut.Description = "DevBar — Developer Workflow Monitor";
+            shortcut.Save();
+
+            Marshal.ReleaseComObject(shortcut);
+            Marshal.ReleaseComObject(shell);
+        }
+        catch (Exception ex)
+        {
+            Log($"Shortcut registration error: {ex.Message}");
+        }
     }
 
     private static bool IsOnBattery()
