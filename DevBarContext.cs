@@ -1,21 +1,15 @@
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
-using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows.Forms;
-using Microsoft.Toolkit.Uwp.Notifications;
-using Windows.UI.Notifications;
+using System.Windows.Threading;
 
 namespace DevBar;
 
 public class DevBarContext : ApplicationContext
 {
-    private readonly NotifyIcon _trayIcon;
-    private readonly System.Windows.Forms.Timer _timer;
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
-    private readonly string _appLogoPath;
-    private readonly string _appIcoPath;
     private static readonly string LogPath = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DevBar", "devbar.log");
 
@@ -25,61 +19,112 @@ public class DevBarContext : ApplicationContext
     private bool _requestInFlight;
     private DateTime _lastFetchTime = DateTime.MinValue;
     private bool _hasShownPreferences;
-    private int _successfulFetches;
     private PopupWindow? _popupWindow;
     private ContextPopup? _contextPopup;
-    private Icon _currentIcon;
+
+    private readonly Dictionary<IntPtr, OverlayWindow> _overlays = new();
+    private readonly TaskbarTracker _tracker;
+    private readonly BroadcastListener _broadcast;
+    private readonly WinEventHookListener _hookListener;
+    private readonly ThemeWatcher _themeWatcher;
+    private readonly DispatcherTimer _dataTimer;
+    private readonly DispatcherTimer _taskbarTimer;
+    private bool _dumpedFirstResponse;
 
     private const double BatteryPollingInterval = 30.0;
 
     public DevBarContext()
     {
         _settings = AppSettings.Load();
-        _currentIcon = IconRenderer.Create(IconState.ServerDown);
-        _appLogoPath = IconRenderer.SaveAppLogoPng();
-        _appIcoPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DevBar", "devbar.ico");
 
-        // Register custom Start Menu shortcut with our icon for toast branding
-        RegisterToastShortcut();
+        _tracker = new TaskbarTracker();
+        _tracker.StateChanged += ApplyTaskbarStates;
 
-        _trayIcon = new NotifyIcon
-        {
-            Icon = _currentIcon,
-            Visible = true,
-            Text = "DevBar",
-        };
-        _trayIcon.MouseUp += OnTrayMouseUp;
+        _broadcast = new BroadcastListener();
+        _broadcast.TaskbarCreated += _tracker.Tick;
 
         var interval = Math.Max(_settings.RefreshSeconds, 0.1f);
-        _timer = new System.Windows.Forms.Timer { Interval = (int)(interval * 1000) };
-        _timer.Tick += OnTimerTick;
-        _timer.Start();
+        _dataTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(interval) };
+        _dataTimer.Tick += OnDataTimerTick;
+        _dataTimer.Start();
 
-        ToastNotificationManagerCompat.OnActivated += OnToastActivated;
+        _themeWatcher = new ThemeWatcher();
+        _themeWatcher.ThemeChanged += OnThemeChanged;
 
-        OnTimerTick(this, EventArgs.Empty);
+        _taskbarTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
+        _taskbarTimer.Tick += (_, _) =>
+        {
+            _tracker.Tick();
+            _themeWatcher.Tick();
+        };
+        _taskbarTimer.Start();
+
+        _hookListener = new WinEventHookListener();
+        _hookListener.ForegroundChanged += _ =>
+            System.Windows.Application.Current.Dispatcher.BeginInvoke(() =>
+            {
+                foreach (var overlay in _overlays.Values)
+                    if (overlay.IsVisible) overlay.ReassertTopmost();
+            });
+
+        _tracker.Tick();
+        OnDataTimerTick(this, EventArgs.Empty);
     }
 
-    private async void OnTimerTick(object? sender, EventArgs e)
+    private async void OnDataTimerTick(object? sender, EventArgs e)
     {
         try { await Update(); }
         catch (Exception ex) { Log($"Update error: {ex}"); }
     }
 
-    private void OnTrayMouseUp(object? sender, MouseEventArgs e)
+    private void ApplyTaskbarStates(IReadOnlyList<TaskbarState> states)
     {
-        try
+        var seen = new HashSet<IntPtr>();
+
+        foreach (var s in states)
         {
-            if (e.Button == MouseButtons.Left)
-                TogglePopup();
-            else if (e.Button == MouseButtons.Right)
-                ShowContextMenu();
+            if (!s.Found) continue;
+            seen.Add(s.Hwnd);
+
+            if (!_overlays.TryGetValue(s.Hwnd, out var overlay))
+            {
+                overlay = new OverlayWindow();
+                overlay.PillClicked += TogglePopup;
+                overlay.RightClicked += ShowContextMenu;
+                overlay.SetTheme(_themeWatcher.IsLightTaskbar);
+                _overlays[s.Hwnd] = overlay;
+                if (_lastResult is not null) overlay.SetResult(_lastResult);
+            }
+
+            if (!s.TaskbarTopmost || s.AutoHidden)
+            {
+                if (overlay.IsVisible) overlay.Hide();
+                continue;
+            }
+
+            if (!overlay.IsVisible) overlay.Show();
+            overlay.UpdateLayout();
+
+            var (left, top) = OverlayPositioner.Compute(
+                s.Rect,
+                overlay.ActualWidth,
+                overlay.ActualHeight,
+                s.DpiScale,
+                _settings.PositionStrategy);
+
+            overlay.Left = left;
+            overlay.Top = top;
         }
-        catch (Exception ex) { Log($"Click error: {ex}"); }
+
+        var stale = _overlays.Keys.Where(k => !seen.Contains(k)).ToList();
+        foreach (var hwnd in stale)
+        {
+            try { _overlays[hwnd].Close(); } catch { /* already closing */ }
+            _overlays.Remove(hwnd);
+        }
     }
 
-    private void ShowContextMenu()
+    private void ShowContextMenu(OverlayWindow source)
     {
         CloseAllPopups();
 
@@ -93,12 +138,11 @@ public class DevBarContext : ApplicationContext
         };
         _contextPopup.QuitClicked += ExitThread;
 
-        PositionAndShow(_contextPopup);
+        ShowPopupAboveOverlay(source, _contextPopup);
     }
 
-    private void TogglePopup()
+    private void TogglePopup(OverlayWindow source)
     {
-        // If popup is already showing, just close it
         if (_popupOpen)
         {
             CloseAllPopups();
@@ -117,24 +161,19 @@ public class DevBarContext : ApplicationContext
             catch (Exception ex) { Log($"Open URL error: {ex}"); }
         };
 
-        PositionAndShow(_popupWindow);
+        ShowPopupAboveOverlay(source, _popupWindow);
         _popupOpen = true;
     }
 
-    private void PositionAndShow(System.Windows.Window window)
+    private void ShowPopupAboveOverlay(OverlayWindow source, System.Windows.Window window)
     {
         window.Left = -10000;
         window.Top = -10000;
         window.Show();
         window.UpdateLayout();
 
-        var cursor = System.Windows.Forms.Cursor.Position;
-        var workArea = System.Windows.SystemParameters.WorkArea;
-        var w = window.ActualWidth;
-        var h = window.ActualHeight;
-
-        window.Left = Math.Max(workArea.Left, Math.Min(cursor.X - w / 2, workArea.Right - w));
-        window.Top = Math.Max(workArea.Top, workArea.Bottom - h);
+        window.Left = source.Left;
+        window.Top = source.Top - window.ActualHeight - 4;
         window.Activate();
     }
 
@@ -175,7 +214,7 @@ public class DevBarContext : ApplicationContext
                 ShowPreferences();
                 _hasShownPreferences = true;
             }
-            UpdateIcon(null);
+            FanOutServerDown();
             return;
         }
 
@@ -185,133 +224,43 @@ public class DevBarContext : ApplicationContext
         try
         {
             var url = _settings.Url + $"?username={Environment.UserName}";
-            var response = await _http.GetAsync(url);
+            var response = await _http.GetAsync(url).ConfigureAwait(false);
 
             if (response.StatusCode == System.Net.HttpStatusCode.ServiceUnavailable)
                 return;
 
             response.EnsureSuccessStatusCode();
-            var json = await response.Content.ReadAsStringAsync();
+            var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            Log($"Fetch: {response.StatusCode}, contentLen={json.Length}");
+
+            if (!_dumpedFirstResponse)
+            {
+                try { File.WriteAllText(Path.Combine(Path.GetDirectoryName(LogPath)!, "last-response.json"), json); } catch { }
+                _dumpedFirstResponse = true;
+            }
+
             var result = JsonSerializer.Deserialize<DevBarResult>(json);
+            var totalItems = result?.Data.Values.Sum(l => l.Count) ?? -1;
+            var nonEmpty = result?.Data.Count(kv => kv.Value.Count > 0) ?? 0;
+            Log($"Parsed: categories={result?.Data.Count ?? -1}, nonEmpty={nonEmpty}, totalItems={totalItems}");
 
             if (result is not null)
             {
-                _successfulFetches++;
-                // Only notify after 2+ successful fetches so we have a stable baseline
-                if (_successfulFetches > 2)
-                    NotifyNewItems(_lastResult, result);
+                var changed = ItemDiffer.GetChangedCategories(_lastResult, result);
                 _lastResult = result;
-                UpdateIcon(result);
+                FanOutResult(result, changed);
             }
         }
         catch (Exception ex)
         {
             Log($"Fetch error: {ex.Message}");
-            UpdateIcon(null);
+            try { FanOutServerDown(); }
+            catch (Exception ex2) { Log($"SetServerDown error: {ex2.Message}"); }
         }
         finally
         {
             _requestInFlight = false;
         }
-    }
-
-    private void UpdateIcon(DevBarResult? result)
-    {
-        IconState state;
-        string tooltip;
-
-        if (result is null)
-        {
-            state = IconState.ServerDown;
-            tooltip = "DevBar — server unreachable";
-        }
-        else
-        {
-            var totalItems = result.Data.Values.Sum(list => list.Count);
-            var hasHighPriority = result.Data.Any(kv =>
-                kv.Value.Count > 0 &&
-                result.Metadata.Display.TryGetValue(kv.Key, out var d) && d.Priority < 10);
-
-            if (totalItems == 0)
-            {
-                state = IconState.AllClear;
-                tooltip = "DevBar — all clear";
-            }
-            else if (hasHighPriority)
-            {
-                state = IconState.HighPriority;
-                tooltip = BuildTooltip(result);
-            }
-            else
-            {
-                state = IconState.HasItems;
-                tooltip = BuildTooltip(result);
-            }
-        }
-
-        var newIcon = IconRenderer.Create(state);
-        _trayIcon.Icon = newIcon;
-        _trayIcon.Text = tooltip;
-        _currentIcon.Dispose();
-        _currentIcon = newIcon;
-    }
-
-    private static string BuildTooltip(DevBarResult result)
-    {
-        var lines = new List<string> { "DevBar" };
-        foreach (var (category, items) in result.Data
-            .Where(kv => kv.Value.Count > 0)
-            .OrderBy(kv => result.Metadata.Display.TryGetValue(kv.Key, out var d) ? d.Priority : 99))
-        {
-            var title = result.Metadata.Display.TryGetValue(category, out var d) ? d.Title : category;
-            lines.Add($"{title}: {items.Count}");
-        }
-        var tooltip = string.Join("\n", lines);
-        return tooltip.Length > 127 ? tooltip[..127] : tooltip;
-    }
-
-    private void NotifyNewItems(DevBarResult? previous, DevBarResult current)
-    {
-        try
-        {
-            var newItems = ItemDiffer.GetNewItems(previous, current);
-            if (newItems.Count == 0) return;
-
-            if (newItems.Count <= 3)
-            {
-                foreach (var (_, symbol, item) in newItems)
-                {
-                    new ToastContentBuilder()
-                        .AddAppLogoOverride(new Uri(_appLogoPath), ToastGenericAppLogoCrop.Circle)
-                        .AddText($"{symbol} {item.Title}")
-                        .AddArgument("url", item.Url)
-                        .Show();
-                }
-            }
-            else
-            {
-                var categories = newItems.Select(n => n.Category).Distinct().Count();
-                new ToastContentBuilder()
-                    .AddAppLogoOverride(new Uri(_appLogoPath), ToastGenericAppLogoCrop.Circle)
-                    .AddText($"{newItems.Count} new items across {categories} categories")
-                    .Show();
-            }
-        }
-        catch (Exception ex)
-        {
-            Log($"Toast error: {ex.Message}");
-        }
-    }
-
-    private static void OnToastActivated(ToastNotificationActivatedEventArgsCompat e)
-    {
-        try
-        {
-            var args = ToastArguments.Parse(e.Argument);
-            if (args.TryGetValue("url", out var url))
-                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-        }
-        catch { /* best effort */ }
     }
 
     private void ShowPreferences()
@@ -321,42 +270,42 @@ public class DevBarContext : ApplicationContext
         {
             _settings = newSettings;
             var interval = Math.Max(_settings.RefreshSeconds, 0.1f);
-            _timer.Interval = (int)(interval * 1000);
+            _dataTimer.Interval = TimeSpan.FromSeconds(interval);
         };
         window.Show();
         window.Activate();
     }
 
-    private void RegisterToastShortcut()
+    private void OnThemeChanged()
     {
-        try
+        var isLight = _themeWatcher.IsLightTaskbar;
+        System.Windows.Application.Current.Dispatcher.Invoke(() =>
         {
-            // Create a Start Menu shortcut with our custom icon so toasts show it in the header
-            var startMenu = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                @"Microsoft\Windows\Start Menu\Programs\DevBar.lnk");
+            foreach (var overlay in _overlays.Values)
+                overlay.SetTheme(isLight);
+        });
+        if (_lastResult is not null) FanOutResult(_lastResult, NoChanges);
+        else FanOutServerDown();
+    }
 
-            if (File.Exists(startMenu)) return;
+    private static readonly IReadOnlySet<string> NoChanges = new HashSet<string>();
 
-            var exePath = Environment.ProcessPath;
-            if (exePath is null) return;
-
-            // Use WScript.Shell COM to create the shortcut
-            dynamic shell = Activator.CreateInstance(
-                Type.GetTypeFromProgID("WScript.Shell")!)!;
-            var shortcut = shell.CreateShortcut(startMenu);
-            shortcut.TargetPath = exePath;
-            shortcut.IconLocation = _appIcoPath;
-            shortcut.Description = "DevBar — Developer Workflow Monitor";
-            shortcut.Save();
-
-            Marshal.ReleaseComObject(shortcut);
-            Marshal.ReleaseComObject(shell);
-        }
-        catch (Exception ex)
+    private void FanOutResult(DevBarResult result, IReadOnlySet<string> changedCategories)
+    {
+        System.Windows.Application.Current.Dispatcher.Invoke(() =>
         {
-            Log($"Shortcut registration error: {ex.Message}");
-        }
+            foreach (var overlay in _overlays.Values)
+                overlay.SetResult(result, changedCategories);
+        });
+    }
+
+    private void FanOutServerDown()
+    {
+        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+        {
+            foreach (var overlay in _overlays.Values)
+                overlay.SetServerDown();
+        });
     }
 
     private static bool IsOnBattery()
@@ -379,11 +328,16 @@ public class DevBarContext : ApplicationContext
     {
         if (disposing)
         {
-            _timer.Dispose();
-            _trayIcon.Dispose();
-            _currentIcon.Dispose();
+            _dataTimer.Stop();
+            _taskbarTimer.Stop();
+            _hookListener.Dispose();
+            _broadcast.Dispose();
+            foreach (var overlay in _overlays.Values)
+            {
+                try { overlay.Close(); } catch { /* already closing */ }
+            }
+            _overlays.Clear();
             _http.Dispose();
-            ToastNotificationManagerCompat.Uninstall();
         }
         base.Dispose(disposing);
     }

@@ -2,11 +2,15 @@ namespace DevBar;
 
 public static class ItemDiffer
 {
-    public static List<(string Category, string Symbol, DevBarItem Item)> GetNewItems(
-        DevBarResult? previous, DevBarResult current)
+    /// <summary>
+    /// Returns the set of categories that gained at least one new item (by URL)
+    /// since the previous result. Returns empty when there is no previous result,
+    /// so a fresh start does not animate every category.
+    /// </summary>
+    public static IReadOnlySet<string> GetChangedCategories(DevBarResult? previous, DevBarResult current)
     {
-        var newItems = new List<(string, string, DevBarItem)>();
-        if (previous is null) return newItems;
+        var changed = new HashSet<string>();
+        if (previous is null) return changed;
 
         var previousUrls = new Dictionary<string, HashSet<string>>();
         foreach (var (category, items) in previous.Data)
@@ -15,16 +19,16 @@ public static class ItemDiffer
         foreach (var (category, items) in current.Data)
         {
             var oldUrls = previousUrls.GetValueOrDefault(category);
-            var symbol = current.Metadata.Display.TryGetValue(category, out var display)
-                ? display.Symbol : "";
-
             foreach (var item in items)
             {
                 if (oldUrls is null || !oldUrls.Contains(item.Url))
-                    newItems.Add((category, symbol, item));
+                {
+                    changed.Add(category);
+                    break;
+                }
             }
         }
 
-        return newItems;
+        return changed;
     }
 }

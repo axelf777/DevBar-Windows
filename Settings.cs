@@ -8,6 +8,7 @@ public class AppSettings
     public string Url { get; set; } = "";
     public float RefreshSeconds { get; set; } = 1.0f;
     public bool StartWithWindows { get; set; }
+    public PositionStrategy PositionStrategy { get; set; } = PositionStrategy.HugLeft;
 
     private static readonly string Dir = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DevBar");
