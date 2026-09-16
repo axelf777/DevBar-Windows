@@ -10,4 +10,7 @@
     <RootNamespace>DevBar</RootNamespace>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Emoji.Wpf" Version="0.3.4" />
+  </ItemGroup>
 </Project>

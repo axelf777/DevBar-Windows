@@ -6,6 +6,7 @@ using System.Windows.Media.Animation;
 using WpfColor = System.Windows.Media.Color;
 using WpfBrushes = System.Windows.Media.Brushes;
 using WpfCursors = System.Windows.Input.Cursors;
+using EmojiTextBlock = Emoji.Wpf.TextBlock;
 
 namespace DevBar;
 
@@ -15,6 +16,32 @@ public partial class OverlayWindow : Window
     public event Action<OverlayWindow>? RightClicked;
 
     private bool _isLightTheme;
+
+    private enum Status { Neutral, Critical, Warning, InProgress, Good }
+
+    private static readonly WpfColor CriticalColor = WpfColor.FromRgb(0xFF, 0x52, 0x52);
+    private static readonly WpfColor WarningColor = WpfColor.FromRgb(0xFF, 0xB3, 0x00);
+    private static readonly WpfColor InProgressColor = WpfColor.FromRgb(0x42, 0xA5, 0xF5);
+    private static readonly WpfColor GoodColor = WpfColor.FromRgb(0x66, 0xBB, 0x6A);
+
+    private static readonly Dictionary<string, Status> CategoryStatus = new()
+    {
+        ["prod_crash"] = Status.Critical,
+        ["js_prod_crash"] = Status.Critical,
+        ["build_failed"] = Status.Critical,
+        ["tests_workflow_failed"] = Status.Critical,
+        ["deploy_test_workflow_failed"] = Status.Critical,
+        ["backups_not_run"] = Status.Critical,
+        ["fortnox_token_missing"] = Status.Critical,
+        ["out_of_date"] = Status.Warning,
+        ["prs_merge_problem"] = Status.Warning,
+        ["prs_needs_work"] = Status.Warning,
+        ["hubspot_queue_too_big"] = Status.Warning,
+        ["build_in_progress"] = Status.InProgress,
+        ["deploy_test_in_progress"] = Status.InProgress,
+        ["prs_to_review"] = Status.InProgress,
+        ["prs_ready_for_merge"] = Status.Good,
+    };
 
     public OverlayWindow()
     {
@@ -90,7 +117,8 @@ public partial class OverlayWindow : Window
         {
             var display = result.Metadata.Display.GetValueOrDefault(category);
             var symbol = display?.Symbol ?? category;
-            AddPill(symbol, items.Count, changedCategories.Contains(category));
+            var priority = display?.Priority ?? 99;
+            AddPill(category, symbol, items.Count, priority, changedCategories.Contains(category));
         }
     }
 
@@ -102,9 +130,9 @@ public partial class OverlayWindow : Window
         AddMutedPill("—");
     }
 
-    private void AddPill(string symbol, int count, bool isNew)
+    private void AddPill(string category, string symbol, int count, int priority, bool isNew)
     {
-        var pill = BuildPillButton(symbol, count.ToString(), ForegroundBrush(), HoverBrush());
+        var pill = BuildPillButton(symbol, count.ToString(), StatusBrush(category, priority), HoverBrush());
         pill.Click += (_, _) => PillClicked?.Invoke(this);
         if (isNew) AttachJump(pill);
         PillsPanel.Children.Add(pill);
@@ -115,6 +143,24 @@ public partial class OverlayWindow : Window
         var pill = BuildPillButton(text, null, MutedBrush(), HoverBrush());
         pill.Click += (_, _) => PillClicked?.Invoke(this);
         PillsPanel.Children.Add(pill);
+    }
+
+    private SolidColorBrush StatusBrush(string category, int priority)
+    {
+        var status = CategoryStatus.TryGetValue(category, out var known)
+            ? known
+            : priority < 10 ? Status.Critical
+            : priority < 13 ? Status.Warning
+            : Status.Neutral;
+
+        return status switch
+        {
+            Status.Critical => new SolidColorBrush(CriticalColor),
+            Status.Warning => new SolidColorBrush(WarningColor),
+            Status.InProgress => new SolidColorBrush(InProgressColor),
+            Status.Good => new SolidColorBrush(GoodColor),
+            _ => ForegroundBrush(),
+        };
     }
 
     private SolidColorBrush ForegroundBrush() => _isLightTheme
@@ -132,11 +178,10 @@ public partial class OverlayWindow : Window
     private static System.Windows.Controls.Button BuildPillButton(string symbol, string? count, SolidColorBrush fg, SolidColorBrush hover)
     {
         var content = new StackPanel { Orientation = System.Windows.Controls.Orientation.Horizontal };
-        content.Children.Add(new TextBlock
+        content.Children.Add(new EmojiTextBlock
         {
             Text = symbol,
-            FontFamily = new System.Windows.Media.FontFamily("Segoe UI Emoji"),
-            FontSize = 17,
+            FontSize = 16,
             Foreground = fg,
             VerticalAlignment = VerticalAlignment.Center,
         });
@@ -145,10 +190,10 @@ public partial class OverlayWindow : Window
             content.Children.Add(new TextBlock
             {
                 Text = count,
-                FontSize = 17,
+                FontSize = 16,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = fg,
-                Margin = new Thickness(3, 0, 0, 0),
+                Margin = new Thickness(4, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center,
             });
         }
