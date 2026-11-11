@@ -1,34 +1,33 @@
 # DevBar for Windows
 
-Windows port of [boxed/DevBar](https://github.com/boxed/DevBar) — a system tray app that polls a JSON endpoint and displays developer workflow status via a color-coded icon, toast notifications, and a rich popup.
+Windows port of [boxed/DevBar](https://github.com/boxed/DevBar) — polls a JSON endpoint and shows developer workflow status as a row of emoji pills on your taskbar, like the macOS menu bar version.
 
 ## Features
 
-- **Color-coded tray icon** — green (all clear), amber (items exist), red (high priority), gray (server down)
-- **Click to expand** — left-click shows a dark-themed popup with categorized items and emoji
-- **Toast notifications** — fires when new items appear, click to open in browser
-- **Hover tooltip** — shows category breakdown at a glance
-- **Battery-aware polling** — throttles to 30s intervals on battery power
-- **503 handling** — keeps showing old data while server warms up
+- **Taskbar overlay** — one pill per category that has items (its emoji plus a count), docked at the left edge of every taskbar. Hides while the taskbar is auto-hidden or a fullscreen app is in front.
+- **Color-coded pills** — red (critical), amber (warning), blue (in progress), green (good). Categories without a built-in status are colored by priority: below 10 is red, 10–12 is amber, anything else uses the normal text color.
+- **Click a pill** — opens a popup listing the items per category; click an item to open its URL.
+- **New-item bounce** — a pill bounces when its category gains an item.
+- **Right-click a pill** — Preferences, Refresh, Quit.
+- **Follows the taskbar theme** — light or dark.
+- **Battery-aware polling** — throttles to 30 s intervals on battery power.
+- **503 handling** — keeps showing old data while the server warms up. A `—` pill means the server can't be reached.
 
 ## Setup
 
-1. Download `DevBar.exe` from [Releases](https://github.com/axelf777/DevBar-Windows/releases)
-2. Run it — a Preferences window will open on first launch
-3. Enter your DevBar JSON endpoint URL and click Save
+1. Download `DevBar.exe` from [Releases](https://github.com/axelf777/DevBar-Windows/releases). It's self-contained — no .NET install needed.
+2. Run it. The exe isn't code-signed, so Windows SmartScreen may warn on first run: click **More info → Run anyway**.
+3. A Preferences window opens on first launch. Enter your DevBar JSON endpoint URL, optionally tick **Start with Windows**, and click Save.
 
-### Pin the icon to your taskbar
+Settings live in `%AppData%\DevBar\settings.json`.
 
-By default Windows hides new tray icons in the overflow area. To keep DevBar always visible:
+## Troubleshooting
 
-1. Right-click the taskbar
-2. Select **Taskbar settings**
-3. Scroll down to **Other system tray icons**
-4. Toggle **DevBar** to **On**
+DevBar logs errors, data changes and crashes (with stack trace) to `%AppData%\DevBar\devbar.log`. The log is capped at 1 MB; the previous one is kept as `devbar.log.1`. Include both when reporting a problem.
 
 ## JSON endpoint format
 
-DevBar is compatible with the same JSON format as the [original macOS DevBar](https://github.com/boxed/DevBar#usage). Your endpoint should return:
+DevBar is compatible with the same JSON format as the [original macOS DevBar](https://github.com/boxed/DevBar#usage). It requests your URL with `?username=<your Windows username>` appended, and your endpoint should return:
 
 ```json
 {
@@ -49,13 +48,19 @@ DevBar is compatible with the same JSON format as the [original macOS DevBar](ht
 }
 ```
 
-Categories with `priority < 10` are treated as high priority (red icon).
+Pills are ordered by `priority` (lowest first). The built-in category → status colors are in `CategoryStatus` in `OverlayWindow.xaml.cs`.
 
 ## Building from source
 
-Requires [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) on Windows.
+Requires [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) or newer on Windows.
 
 ```
 dotnet build
 dotnet run
+```
+
+To build the single-file release exe:
+
+```
+dotnet publish -c Release -r win-x64 --self-contained -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -o publish
 ```

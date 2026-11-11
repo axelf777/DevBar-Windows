@@ -10,8 +10,6 @@ namespace DevBar;
 public class DevBarContext : ApplicationContext
 {
     private readonly HttpClient _http = new() { Timeout = TimeSpan.FromSeconds(10) };
-    private static readonly string LogPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DevBar", "devbar.log");
 
     private AppSettings _settings;
     private DevBarResult? _lastResult;
@@ -30,6 +28,8 @@ public class DevBarContext : ApplicationContext
     private readonly DispatcherTimer _dataTimer;
     private readonly DispatcherTimer _taskbarTimer;
     private bool _dumpedFirstResponse;
+    private string? _lastFetchError;
+    private string? _lastParseSummary;
 
     private const double BatteryPollingInterval = 30.0;
 
@@ -74,7 +74,7 @@ public class DevBarContext : ApplicationContext
     private async void OnDataTimerTick(object? sender, EventArgs e)
     {
         try { await Update(); }
-        catch (Exception ex) { Log($"Update error: {ex}"); }
+        catch (Exception ex) { AppLog.Write($"Update error: {ex}"); }
     }
 
     private void ApplyTaskbarStates(IReadOnlyList<TaskbarState> states)
@@ -134,7 +134,7 @@ public class DevBarContext : ApplicationContext
         _contextPopup.RefreshClicked += async () =>
         {
             try { await Update(); }
-            catch (Exception ex) { Log($"Refresh error: {ex}"); }
+            catch (Exception ex) { AppLog.Write($"Refresh error: {ex}"); }
         };
         _contextPopup.QuitClicked += ExitThread;
 
@@ -158,7 +158,7 @@ public class DevBarContext : ApplicationContext
         _popupWindow.ItemClicked += url =>
         {
             try { Process.Start(new ProcessStartInfo(url) { UseShellExecute = true }); }
-            catch (Exception ex) { Log($"Open URL error: {ex}"); }
+            catch (Exception ex) { AppLog.Write($"Open URL error: {ex}"); }
         };
 
         ShowPopupAboveOverlay(source, _popupWindow);
@@ -231,18 +231,16 @@ public class DevBarContext : ApplicationContext
 
             response.EnsureSuccessStatusCode();
             var json = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-            Log($"Fetch: {response.StatusCode}, contentLen={json.Length}");
+            LogFetchRecovered();
 
             if (!_dumpedFirstResponse)
             {
-                try { File.WriteAllText(Path.Combine(Path.GetDirectoryName(LogPath)!, "last-response.json"), json); } catch { }
+                try { File.WriteAllText(Path.Combine(AppLog.LogDirectory, "last-response.json"), json); } catch { }
                 _dumpedFirstResponse = true;
             }
 
             var result = JsonSerializer.Deserialize<DevBarResult>(json);
-            var totalItems = result?.Data.Values.Sum(l => l.Count) ?? -1;
-            var nonEmpty = result?.Data.Count(kv => kv.Value.Count > 0) ?? 0;
-            Log($"Parsed: categories={result?.Data.Count ?? -1}, nonEmpty={nonEmpty}, totalItems={totalItems}");
+            LogParseSummaryIfChanged(result);
 
             if (result is not null)
             {
@@ -253,14 +251,40 @@ public class DevBarContext : ApplicationContext
         }
         catch (Exception ex)
         {
-            Log($"Fetch error: {ex.Message}");
+            LogFetchErrorIfNew(ex.Message);
             try { FanOutServerDown(); }
-            catch (Exception ex2) { Log($"SetServerDown error: {ex2.Message}"); }
+            catch (Exception ex2) { AppLog.Write($"SetServerDown error: {ex2.Message}"); }
         }
         finally
         {
             _requestInFlight = false;
         }
+    }
+
+    // Polling runs every second by default, so logging every fetch fills the
+    // disk. Only transitions are logged: a new error, recovery, changed data.
+    private void LogFetchErrorIfNew(string message)
+    {
+        if (message == _lastFetchError) return;
+        _lastFetchError = message;
+        AppLog.Write($"Fetch error: {message}");
+    }
+
+    private void LogFetchRecovered()
+    {
+        if (_lastFetchError is null) return;
+        _lastFetchError = null;
+        AppLog.Write("Fetch OK again");
+    }
+
+    private void LogParseSummaryIfChanged(DevBarResult? result)
+    {
+        var totalItems = result?.Data.Values.Sum(l => l.Count) ?? -1;
+        var nonEmpty = result?.Data.Count(kv => kv.Value.Count > 0) ?? 0;
+        var summary = $"categories={result?.Data.Count ?? -1}, nonEmpty={nonEmpty}, totalItems={totalItems}";
+        if (summary == _lastParseSummary) return;
+        _lastParseSummary = summary;
+        AppLog.Write($"Parsed: {summary}");
     }
 
     private void ShowPreferences()
@@ -311,17 +335,6 @@ public class DevBarContext : ApplicationContext
     private static bool IsOnBattery()
     {
         return SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Offline;
-    }
-
-    private static void Log(string message)
-    {
-        try
-        {
-            var dir = Path.GetDirectoryName(LogPath)!;
-            Directory.CreateDirectory(dir);
-            File.AppendAllText(LogPath, $"[{DateTime.Now:HH:mm:ss}] {message}\n");
-        }
-        catch { /* logging must never crash the app */ }
     }
 
     protected override void Dispose(bool disposing)
